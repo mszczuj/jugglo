@@ -50,19 +50,20 @@ class ImuMeasurement:
                 f"{self.host_timestamp}")
     
     @classmethod
-    def from_csv_row(self, row: str):
+    def from_csv_row(cls, row: str):
         """Create an ImuMeasurement from a CSV row."""
         parts = row.strip().split(',')
-        self.timestamp_ms = int(parts[0])
-        self.device_sequence_number = int(parts[1])
-        self.sensor_id = int(parts[2])
-        self.battery_mv = int(parts[3])
-        self.accel_gyro = tuple(map(float, parts[4:10]))
-        self.sequence_number = int(parts[10])
-        self.checksum_good = bool(int(parts[11]))
-        self.host_timestamp = float(parts[12])
-        return self
-        
+        return cls(
+            timestamp_ms=int(parts[0]),
+            device_sequence_number=int(parts[1]),
+            sensor_id=int(parts[2]),
+            battery_mv=int(parts[3]),
+            accel_gyro=tuple(map(float, parts[4:10])),
+            sequence_number=int(parts[10]),
+            checksum_good=bool(int(parts[11])),
+            host_timestamp=float(parts[12])
+        )   
+
 
 def imu_checksum16(data) -> int:
     """
