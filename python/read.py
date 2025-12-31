@@ -126,10 +126,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Read IMU datagrams from serial port.")
     parser.add_argument("--serial_port", type=str, default="/dev/ttyACM0", help="Serial port (e.g., /dev/ttyACM0 or COM3) (default: /dev/ttyACM0)")
-    parser.add_argument("--serial", type=bool, default=False, help="Read from serial port (default: False)")
+    parser.add_argument("--serial", action='store_true', default=False, help="Read from serial port (default: False)")
     parser.add_argument("--server_host", type=str, default="0.0.0.0", help="Server host to bind (default:0.0.0.0)")
     parser.add_argument("--server_port", type=int, default=50555, help="Server port to bind (default:50555)")
-    parser.add_argument("--stats", type=bool, default=False, help="Online stats (default: False)")
+    parser.add_argument("--stats", action='store_true', default=False, help="Online stats (default: False)")
         
     args = parser.parse_args()
 
