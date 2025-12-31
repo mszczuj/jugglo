@@ -112,8 +112,9 @@
 #define BMI160_CHIP_ID_DEFAULT_VALUE 0xD1
 #define BMI160_DEFAULT_ADDRESS 0x69
 
+#define MAX_BUFFER_SIZE 10 // 10 samples of 12 bytes each (6 for accel, 6 for gyro)
 
-class IMUBMI160 : public IMUBase {
+class IMUBMI160 {
 public:
     IMUBMI160() : dev_handle(nullptr), bus_handle(nullptr), i2c_address(BMI160_DEFAULT_ADDRESS) {
 
@@ -149,20 +150,10 @@ public:
 
         ESP_LOGI(IMUTAG, "BMI160 initialized (chip_id=%d)", chip_id);
 
-        aRes = 16.f / 32768.f;			//ares value for full range (16g) readings
-	    gRes = 2000.f / 32768.f;	    //gres value for full range (2000dps) readings
-        expected_interval_us = 2500; // 400Hz update rate
-
         return ESP_OK;
     };
 
-    int initialize() override {
-        // Fallback for compatibility: bus must be set by caller via two-arg initialize
-        assert(bus_handle != nullptr);
-        return initialize(bus_handle, i2c_address);
-    }
-
-    int update() override {
+    int update() {
 
         // Read FIFO byte count (11-bit value across two registers)
         uint8_t fifo_len_raw[2] = {0};
@@ -179,25 +170,16 @@ public:
 
         // Parse the FIFO assuming accel + gyro in header-less mode (12 bytes per frame).
         size_t frames = fifo_len / FIFO_FRAME_BYTES;
-        size_t offset = fifo_len - frames * FIFO_FRAME_BYTES; // skip any trailing partial bytes
 
         // Copy the entire FIFO buffer to imu_buffer as int16_t values (little-endian pairs)
-        size_t imu_count = fifo_len / 2;
         for (size_t i = 0; i + 1 < fifo_len && i / 2 < sizeof(imu_buffer) / sizeof(int16_t); i += 2) {
             imu_buffer[i / 2] = ((int16_t)fifo_buffer[i + 1] << 8) | fifo_buffer[i];
         }
         
         return fifo_len / FIFO_FRAME_BYTES;
     };
-
-    virtual void getAccel(int16_t* out) override {
-        // memcpy(out, &IMUCount[3], 3*sizeof(int16_t));
-    };
     
-    virtual void getGyro(int16_t* out) override {
-        // memcpy(out, &IMUCount[0], 3*sizeof(int16_t));
-    };
-    int16_t imu_buffer[128];  // local buffer for parsed IMU samples (accel + gyro interleaved)
+    int16_t imu_buffer[6 * MAX_BUFFER_SIZE];  // local buffer for parsed IMU samples (accel + gyro interleaved)
 
 private:
     i2c_master_dev_handle_t dev_handle;
@@ -205,11 +187,9 @@ private:
     uint8_t i2c_address;
     
     static constexpr size_t FIFO_FRAME_BYTES = 12;
-    uint8_t read_buffer[12];  // x/y/z gyo and accel buffer for i2c reads
-    
-    // this buffer is to big (we read at max 8 smaples (12 bytes each, so 96 bytes max), but for future proofing
-    // if stack problems rise we can reduce it
-    uint8_t fifo_buffer[512];   // local scratch for draining BMI160 FIFO
+    // uint8_t read_buffer[12];  // x/y/z gyo and accel buffer for i2c reads
+    uint8_t fifo_buffer[FIFO_FRAME_BYTES * MAX_BUFFER_SIZE]; // local scratch for draining BMI160 FIFO
+                                                // enough for 10 frames (120 bytes)
 
     void addDeviceIfNeeded() {
         if (dev_handle != nullptr) {

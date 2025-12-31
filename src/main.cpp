@@ -3,7 +3,6 @@
 #include "freertos/event_groups.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -12,6 +11,7 @@
 #include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "driver/uart.h"
 #include <netdb.h>
 #include <cstdio>
 #include <cerrno>
@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "battery.hpp"
 #include "imu_bmi160.hpp"
 
 #if __has_include("wifi_secret.h")
@@ -44,6 +45,12 @@ static i2c_master_bus_handle_t i2c_bus = nullptr;
 #define LED_GPIO GPIO_NUM_15   // ESP32-C6 DevKit LED
 
 #define TAG "app"
+#define BATTERY_ADC_UNIT     ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL  ADC_CHANNEL_0  // GPIO0 on ESP32-C6; change if your battery divider is on another pin
+#define BATTERY_ADC_ATTEN    ADC_ATTEN_DB_11
+#define BATTERY_DIVIDER_RATIO 2.0f          // scale ADC pin voltage back to battery voltage
+
+static BatteryMonitor s_battery(BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL, BATTERY_ADC_ATTEN, BATTERY_DIVIDER_RATIO);
 
 static void init_i2c(void)
 {
@@ -152,9 +159,9 @@ static void udp_client_connect(void)
     struct addrinfo *res;
 
     char port_str[6];
-    snprintf(port_str, sizeof(port_str), "%d", TCP_PORT);
+    snprintf(port_str, sizeof(port_str), "%d", MASTER_PORT);
 
-    int err = getaddrinfo(TCP_HOST, port_str, &hints, &res);
+    int err = getaddrinfo(MASTER_HOST, port_str, &hints, &res);
     if (err != 0 || res == NULL) {
         ESP_LOGE(TAG, "DNS lookup failed: %d", err);
         return;
@@ -175,7 +182,7 @@ static void udp_client_connect(void)
         return;
     }
 
-    ESP_LOGI(TAG, "UDP socket ready to %s:%d", TCP_HOST, TCP_PORT);
+    ESP_LOGI(TAG, "UDP socket ready to %s:%d", MASTER_HOST, MASTER_PORT);
 
     freeaddrinfo(res);
 }
@@ -194,13 +201,19 @@ void send_datagram(const void* data, size_t len) {
     }
 }
 
+struct __attribute__((packed)) ImuPayload{
+    int16_t accel_gyro[6]; // 0-2: accel x,y,z; 3-5: gyro x,y,z
+};
+
 struct __attribute__((packed)) ImuDatagram {
     char magic[4]; // "IMUD"
     uint32_t timestamp_ms;     //  
     uint16_t sequence_number;  // 
     uint8_t  sensor_id;        // 
-    int16_t  accel_gyro[6];    // ax,ay,az, gx,gy,gz (12 bytes)
     uint16_t checksum;         // 16-bit ones' complement over all preceding bytes
+    uint8_t  payload_size;     // size of payload in samples count
+    uint16_t battery_mv;     // battery voltage in millivolts
+    ImuPayload payload[10];        // payload data
 };
 
 
@@ -252,6 +265,7 @@ extern "C" void app_main(void)
     IMUBMI160 imu;
 
     ESP_ERROR_CHECK( imu.initialize(i2c_bus) );
+    ESP_ERROR_CHECK( s_battery.init() );
 
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(LED_GPIO, 1);  // LED ON
@@ -264,76 +278,52 @@ extern "C" void app_main(void)
         0,                    // timestamp_ms
         0,                    // sequence_number
         2,                    // sensor_id
-        {0, 0, 0, 0, 0, 0},   // accel_gyro
-        0                     // checksum
-    }; // size = 24 bytes
+        0,                    // checksum
+        10,                   // payload_size        
+        {}
+    }; 
+
 
     int16_t accel_gyro_buf[6];
-
-    size_t batch_size = 10;
-    ImuDatagram dgram_batch[batch_size];
-
-    for (size_t i = 0; i < batch_size; ++i)
-        memcpy(&dgram_batch[i], &datagram, sizeof(ImuDatagram));
-    
+    size_t batch_size = 10;    
     uint16_t seq_num = 0;
+    uint16_t battery_mv = 0;
+
+
     while (1) {
 
         vTaskDelay(pdMS_TO_TICKS(20)); // that gives imu time to fill fifo (with 8-9 samples), while we  wifi driver is sending data
         int samples_count = imu.update();
-        // ESP_LOGI(TAG, "Read %d samples", samples_count);
-        for (uint8_t sample_no=0; sample_no < samples_count && sample_no < batch_size; sample_no++) {            
+        datagram.timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        datagram.sequence_number = seq_num++;
+        datagram.payload_size = samples_count;
+        datagram.battery_mv = battery_mv;
+
+        for (uint8_t sample_no=0; sample_no < samples_count && sample_no < batch_size; sample_no++) {
             // copy imu data to datagram
-            memcpy((void*)dgram_batch[sample_no].accel_gyro, (const void*)&imu.imu_buffer[sample_no * 6], sizeof(accel_gyro_buf));
-
-            // that will be timestamp of the end of the batch
-            dgram_batch[sample_no].timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            dgram_batch[sample_no].sequence_number = seq_num++;        
-            imu_datagram_update_checksum(dgram_batch[sample_no]);            
+            memcpy((void*)datagram.payload[sample_no].accel_gyro, (const void*)&imu.imu_buffer[sample_no * 6], sizeof(accel_gyro_buf));
+        
+            // imu_datagram_update_checksum(datagram);
         }
-        send_datagram(&dgram_batch, sizeof(datagram) * samples_count);
 
-        // vTaskDelay(pdMS_TO_TICKS(10));
 
-        
-        // fwrite(&dgram_batch, sizeof(dgram_batch), 1, stdout);
+        // variable size of dataram depending on samples count
+        send_datagram(&datagram, sizeof(datagram) - (10 - samples_count) * sizeof(ImuPayload));
+
+        // fwrite(&dgram_batch, sizeof(dgram_batch), samples_count, stdout);
         // fflush(stdout);
-        // for (size_t i = 0; i < batch_size; i++) {
-        //     // imu.waitAndUpdate();
-        //     // if (i!= 0) 
-        //     vTaskDelay(pdMS_TO_TICKS(10));
-        //     int values_count = imu.update();
-        //     // imu.getAccel(accel_gyro_buf);
-        //     // imu.getGyro(accel_gyro_buf + 3);
 
-        //     // memcpy((void*)dgram_batch[i].accel_gyro, (const void*)accel_gyro_buf, sizeof(accel_gyro_buf));
-
-        //     dgram_batch[i].timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        //     dgram_batch[i].sequence_number = seq_num++;
-            
-        //     imu_datagram_update_checksum(dgram_batch[i]);
-
-        //     ESP_LOGI(TAG, "Read %d samples", values_count);
-
-        // }
-
-        // vTaskDelay(pdMS_TO_TICKS(10));
-        // int samples_count = imu.update();
-        // for (uint8_t sample_no=0; sample_no < samples_count && sample_no < batch_size; sample_no++) {            
-        //     // copy imu data to datagram
-
-        //     memcpy((void*)dgram_batch[sample_no].accel_gyro, (const void*)&imu.imu_buffer[sample_no * 6], sizeof(accel_gyro_buf));
-
-        //     // that will be timestamp of the end of the batch
-        //     dgram_batch[sample_no].timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        //     dgram_batch[sample_no].sequence_number = seq_num++;
-            
-        //     imu_datagram_update_checksum(dgram_batch[sample_no]);            
-        // }
-        
-        // fwrite(&dgram_batch, sizeof(dgram_batch), 1, stdout);
-        // fflush(stdout);
-    
-    
+        static uint32_t last_batt_log_ms = 0;
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now_ms - last_batt_log_ms > 10000) { // log battery roughly every 10 seconds
+            battery_mv = s_battery.read_voltage_mv();
+            if (battery_mv >= 0) {
+                ESP_LOGI(TAG, "Battery: %d mV", battery_mv);
+            } else {
+                ESP_LOGW(TAG, "Battery voltage read failed");
+            }
+            last_batt_log_ms = now_ms;
+        }
+                    
     }
 }

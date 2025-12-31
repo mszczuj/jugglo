@@ -1,5 +1,6 @@
 #%%
 from dataclasses import dataclass
+from typing import Generator
 import serial
 import struct
 import argparse
@@ -9,24 +10,59 @@ import matplotlib.pyplot as plt
 from numpy_ringbuffer  import RingBuffer
 import numpy as np
 
-
 ## this must match the definitions in imu_base.hpp and main.cpp
 aRes = 16.0 / 32768.0    	# ares value for full range (16g) readings
 gRes = 2000.0 / 32768.0	    # gres value for full range (2000dps) readings
 
 # Python struct format string for ImuDatagram (without magic header)
-# Format: I (timestamp_ms) + H (sequence_number) + B (sensor_id) + 6h (accel_gyro)
-IMUD_FORMAT = '<IHB6hH'
-IMUD_SIZE = struct.calcsize(IMUD_FORMAT)
+# Format: I (timestamp_ms) + H (sequence_number) + B (sensor_id) + H * (checksum) + B (payload_size) + H(battery_mv)
+IMUD_FORMAT_HDR = '<IHBHBH' 
+IMUD_HDR_SIZE = struct.calcsize(IMUD_FORMAT_HDR)
 
 @dataclass
-class ImuDatagram:
+class ImuMeasurement:
     timestamp_ms: int
     sequence_number: int
     sensor_id: int
     accel_gyro: tuple
-    checksum_good: bool 
+    device_sequence_number: int
+    battery_mv: int
+    checksum_good: bool     
     host_timestamp: float 
+
+    def to_string(self) -> str:
+        """String representation of the ImuMeasurement."""
+        return (f"ImuMeasurement(timestamp_ms={self.timestamp_ms}, "
+                f"device_sequence_number={self.device_sequence_number}, "
+                f"sensor_id={self.sensor_id}, "
+                f"battery_mv={self.battery_mv}, "
+                f"accel_gyro={self.accel_gyro}, "
+                f"sequence_number={self.sequence_number}, "
+                f"checksum_good={self.checksum_good}, "
+                f"host_timestamp={self.host_timestamp})")
+    
+    def to_csv_row(self) -> str:
+        """CSV row representation of the ImuMeasurement."""
+        return (f"{self.timestamp_ms},{self.device_sequence_number},"
+                f"{self.sensor_id},{self.battery_mv},"
+                f"{','.join(map(str, self.accel_gyro))},"
+                f"{self.sequence_number},{int(self.checksum_good)},"
+                f"{self.host_timestamp}")
+    
+    @classmethod
+    def from_csv_row(self, row: str):
+        """Create an ImuMeasurement from a CSV row."""
+        parts = row.strip().split(',')
+        self.timestamp_ms = int(parts[0])
+        self.device_sequence_number = int(parts[1])
+        self.sensor_id = int(parts[2])
+        self.battery_mv = int(parts[3])
+        self.accel_gyro = tuple(map(float, parts[4:10]))
+        self.sequence_number = int(parts[10])
+        self.checksum_good = bool(int(parts[11]))
+        self.host_timestamp = float(parts[12])
+        return self
+        
 
 def imu_checksum16(data) -> int:
     """
@@ -51,19 +87,35 @@ def imu_checksum16(data) -> int:
 
     return (~s) & 0xFFFF
 
-def parse_imu_datagram(data):
-    """Parse IMU datagram from bytes"""
-    timestamp_ms, sequence_number, sensor_id, *accel_gyro, checksum = struct.unpack(IMUD_FORMAT, data)
-    checksum_good = checksum == imu_checksum16(data[:-2])
-    return ImuDatagram(
-        timestamp_ms=timestamp_ms,
-        sequence_number=sequence_number,
-        sensor_id=sensor_id,
-        accel_gyro=(accel_gyro[3] * aRes, accel_gyro[4] * aRes, accel_gyro[5] * aRes,
-                       accel_gyro[0] * gRes, accel_gyro[1] * gRes, accel_gyro[2] * gRes),
-        checksum_good=checksum_good,
-        host_timestamp= time.time()
-    )
+
+def parse_imu_datagram(data) -> Generator[ImuMeasurement, None, None]:
+    timestamp_ms, sequence_number, sensor_id, checksum, payload_size, battery_mv = struct.unpack(IMUD_FORMAT_HDR, data[4:IMUD_HDR_SIZE  + 4])
+    assert payload_size <=10, "Payload size exceeds maximum samples count"
+    accel_gyro = struct.unpack('<' + 'h' * payload_size * 6, data[IMUD_HDR_SIZE  + 4:IMUD_HDR_SIZE  + 4 + payload_size * 12])    
+    for i in range(payload_size):
+        start_idx = i * 6
+        sample_accel_gyro = (
+            accel_gyro[start_idx + 3] * aRes,
+            accel_gyro[start_idx + 4] * aRes,
+            accel_gyro[start_idx + 5] * aRes,
+            accel_gyro[start_idx + 0] * gRes,
+            accel_gyro[start_idx + 1] * gRes,
+            accel_gyro[start_idx + 2] * gRes,
+        )
+        checksum_good = checksum == imu_checksum16(data[:-2])
+        yield ImuMeasurement(
+            timestamp_ms=timestamp_ms,
+            device_sequence_number=sequence_number,
+            sequence_number = parse_imu_datagram.local_sequence_number,
+            sensor_id=sensor_id,            
+            checksum_good=checksum_good,
+            battery_mv=battery_mv,
+            accel_gyro=sample_accel_gyro,
+            host_timestamp=time.time()
+        )
+        parse_imu_datagram.local_sequence_number += 1
+    
+parse_imu_datagram.local_sequence_number = 0
 
 def read_datagram_from_serial(port, baudrate=115_200, timeout=1):    
     with serial.Serial(port, baudrate=baudrate, timeout=timeout) as ser:
@@ -88,11 +140,11 @@ def read_datagram_from_serial(port, baudrate=115_200, timeout=1):
                 imu_data = parse_imu_datagram(datagram)
                 yield imu_data
 
-def read_datagram_from_socket(host, port, timeout=1.0):
+
+def read_datagram_from_socket(host, port, timeout=1.0) -> Generator[ImuMeasurement, None, None]:
     """Generator that binds a UDP socket and yields parsed datagrams from clients."""
     header = b'IMUD'
     header_len = len(header) # 4 bytes
-    packet_len = header_len + IMUD_SIZE # 20bytes
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -102,25 +154,13 @@ def read_datagram_from_socket(host, port, timeout=1.0):
 
         while True:
             try:
-                data, addr = server.recvfrom(packet_len*20)  # read a packet; allow some slack
+                #read max size of the packet (magic + header + max payload)
+                # TODO add additinoal check for checksum and sequence number order (if UDP packets are lost or out of order)
+                data, addr = server.recvfrom(IMUD_HDR_SIZE + 4 + 6*2*10)  # read a packet; 4 bytes for magic ('IMUD')
+                for m in parse_imu_datagram(data):
+                    yield m                
             except socket.timeout:
                 continue
-
-            offset = 0
-            while True:
-                start = data.find(header, offset)
-                if start == -1:
-                    break
-                end = start + packet_len
-                if end > len(data):
-                    break  # incomplete datagram at end of packet
-
-                datagram = data[start + header_len:end]
-                imu_data = parse_imu_datagram(datagram)
-                yield imu_data
-
-                offset = end
-
 
 if __name__ == "__main__":
 
@@ -170,7 +210,11 @@ if __name__ == "__main__":
                 
     else:  # just print the data
         for i, d in enumerate(in_stream):
-            if d.checksum_good:
+            print  (d.to_csv_row(), flush=True)
+            # print(str(d.accel_gyro)[1:-1], flush=True)
+            # print (d)
+
+            # if d.checksum_good:
                 # pass
-                print(str(d.accel_gyro)[1:-1], flush=True)
+                # print(str(d.accel_gyro)[1:-1], flush=True)
             # print (d.sequence_number, d.timestamp_ms, d.host_timestamp, flush=True)
