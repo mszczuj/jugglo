@@ -16,7 +16,7 @@ Wi-Fi credentials live in `src/wifi_secret.h` (see below).
 
 
 ## Receiving data on the host
-- Ensure the host machine is reachable at `TCP_HOST` on `TCP_PORT`.
+- Ensure the host machine is reachable at `MASTER_HOST` on `MASTER_PORT`.
 - View raw sensor data and orientation filter output with:
 ```bash
 python read.py | python plot_raw_vis.py 
@@ -40,11 +40,11 @@ The project is developed with PlatformIO on the Espressif platform (tested on Ub
 #define WIFI_PASS "your-password"
 
 // Host that receives UDP IMU packets
-#define TCP_HOST "host-or-ip"
-#define TCP_PORT 50555
+#define MASTER_HOST "host-or-ip"
+#define MASTER_PORT 50555
 ```
-
-> Note: `src/main.cpp` expects `TCP_HOST`/`TCP_PORT`; the default fallback defines `MASTER_*` but those macros are unused in the current code, so define the TCP_* values in your secret header.
+M_H
+> Note: `src/main.cpp` expects `MASTER_HOST`/`MASTER_PORT`; the default fallback defines `MASTER_*` but those macros are unused in the current code, so define the TCP_* values in your secret header.
 
 
 ## Build with PlatformIO
