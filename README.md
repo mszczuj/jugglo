@@ -19,9 +19,23 @@ Wi-Fi credentials live in `src/wifi_secret.h` (see below).
 - Ensure the host machine is reachable at `MASTER_HOST` on `MASTER_PORT`.
 - View raw sensor data and orientation filter output with:
 ```bash
-python read.py | python plot_raw_vis.py 
+> python read.py
+14873,584,2,3996,-0.98681640625,-0.1142578125,0.056640625,0.244140625,0.0,0.1220703125,0,0,1767274563.513852
+14873,584,2,3996,-0.986328125,-0.11376953125,0.05810546875,0.244140625,-0.06103515625,0.06103515625,1,0,1767274563.5138826
+14873,584,2,3996,-0.98583984375,-0.11376953125,0.05908203125,0.244140625,-0.06103515625,0.06103515625,2,0,1767274563.5138955
+...
 ```
+Each row in console spam is csv formatted imu data with following columns:
+```bash
+timestamp_ms,device_sequence_number,sensor_id,battery_mv,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,sequence_number,checksum_good,host_timestamp
+```
+acceleremter are in g and gyro in deg/s 
 
+
+In order to see the basic visualisation see here: 
+```bash 
+> python read.py | python plot_raw_vis.py 
+```
 
 ### Development 
 
