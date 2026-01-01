@@ -5,3 +5,6 @@
 .vscode/ipch
 src/wifi_secret.h
 python/__pycache__
+*.npy
+*.csv
+
