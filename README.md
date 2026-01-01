@@ -15,7 +15,7 @@ Wi-Fi credentials live in `src/wifi_secret.h` (see below).
 - Wiring: SCL → GPIO20, SDA → GPIO19 (internal pull-ups enabled)
 
 
-## Receiving data on the host
+### Receiving data on the host
 - Ensure the host machine is reachable at `MASTER_HOST` on `MASTER_PORT`.
 - View raw sensor data and orientation filter output with:
 ```bash
